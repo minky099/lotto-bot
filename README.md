@@ -30,6 +30,9 @@ echo '[[1,7,12,23,34,40],[3,9,15,22,31,45]]' | python lotto_bot.py --stdin
 
 # dry-run (실제 구매 없이 번호 검증만; 로그인/HTTP 호출 안 함)
 python lotto_bot.py --dry-run "1,7,12,23,34,40" "3,9,15,22,31,45"
+
+# 로그인 테스트 (로그인 성공 여부와 잔액만 확인; 구매 안 함)
+python lotto_bot.py --login-only
 ```
 
 ## 주의
