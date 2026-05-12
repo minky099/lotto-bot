@@ -1,21 +1,20 @@
-"""Claude가 추천한 번호로 동행복권 로또 6/45를 자동 구매하는 봇.
+"""외부에서 입력받은 번호로 동행복권 로또 6/45를 자동 구매하는 봇.
 
-흐름:
-    1. 동행복권 로그인 (requests.Session)
-    2. Anthropic Claude API에 추천 번호를 요청 (5게임)
-    3. execBuy.do 로 수동 모드 구매
-    4. (선택) Discord 웹훅으로 결과 알림
+사용법:
+    python lotto_bot.py "1,7,12,23,34,40" "3,9,15,22,31,45" ...
+        # 인자 1개당 1게임. 1~5게임까지 가능. 게임당 1,000원.
+
+    python lotto_bot.py --stdin
+        # stdin으로 JSON 배열 입력 (예: [[1,7,12,23,34,40], ...])
 
 환경 변수:
-    DHLOTTERY_USER_ID, DHLOTTERY_PASSWORD : 동행복권 계정
-    ANTHROPIC_API_KEY                    : Claude API 키
-    LOTTO_GAME_COUNT (선택, 기본 5)       : 구매 게임 수 (1~5)
+    DHLOTTERY_USER_ID, DHLOTTERY_PASSWORD : 동행복권 계정 (필수)
     DISCORD_WEBHOOK_URL (선택)            : 알림용 웹훅
-    CLAUDE_MODEL (선택, 기본 claude-opus-4-7) : 추천에 사용할 모델
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import os
@@ -24,11 +23,9 @@ import sys
 from dataclasses import dataclass
 
 import requests
-from anthropic import Anthropic
 
 LOGIN_URL = "https://www.dhlottery.co.kr/userSsl.do?method=login"
 MAIN_URL = "https://dhlottery.co.kr/common.do?method=main"
-ROUND_INFO_URL = "https://www.dhlottery.co.kr/common.do?method=main"
 READY_URL = "https://ol.dhlottery.co.kr/olotto/game/egovUserReadySocket.json"
 BUY_URL = "https://ol.dhlottery.co.kr/olotto/game/execBuy.do"
 GAME_PAGE_URL = "https://ol.dhlottery.co.kr/olotto/game/game645.do"
@@ -85,7 +82,6 @@ class DhLotteryClient:
         log.info("로그인 성공: %s", self.user_id)
 
     def _ready(self) -> str:
-        """JSESSIONID 발급 + 회차 정보 확인. JSESSIONID 문자열 반환."""
         resp = self.session.post(READY_URL, headers={"Referer": GAME_PAGE_URL}, timeout=10)
         resp.raise_for_status()
         data = resp.json()
@@ -103,9 +99,6 @@ class DhLotteryClient:
     def buy(self, games: list[list[int]]) -> PurchaseResult:
         if not 1 <= len(games) <= 5:
             raise ValueError("게임 수는 1~5 사이여야 합니다.")
-        for g in games:
-            if len(g) != 6 or len(set(g)) != 6 or any(n < 1 or n > 45 for n in g):
-                raise ValueError(f"잘못된 번호 조합: {g}")
 
         jsession = self._ready()
         direct = self._direct_ip()
@@ -120,7 +113,7 @@ class DhLotteryClient:
             })
 
         body = {
-            "round": "",  # 빈 값이면 서버가 다음 회차로 처리
+            "round": "",
             "direct": direct,
             "nBuyAmount": str(1000 * len(games)),
             "param": json.dumps(param, ensure_ascii=False),
@@ -156,59 +149,31 @@ class DhLotteryClient:
         return int(m.group(1).replace(",", ""))
 
 
-# ---------- Claude 추천 ----------
+# ---------- 입력 파싱 ----------
 
-NUMBER_PATTERN = re.compile(r"\b([1-9]|[1-3][0-9]|4[0-5])\b")
-
-
-def recommend_numbers(game_count: int, model: str) -> list[list[int]]:
-    """Claude에게 6/45 번호 game_count세트를 추천받아 정수 리스트로 반환."""
-    client = Anthropic()
-    prompt = (
-        f"한국 로또 6/45 번호를 {game_count}세트 추천해줘.\n"
-        "각 세트는 1~45 사이 서로 다른 정수 6개로 구성되고, 오름차순으로 정렬해.\n"
-        "응답은 반드시 JSON 배열만 출력해. 예: [[1,7,12,23,34,40], ...]\n"
-        "설명, 코드블록, 주석 금지. 순수 JSON만."
-    )
-    msg = client.messages.create(
-        model=model,
-        max_tokens=512,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    text = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text").strip()
-
-    games = _parse_games(text, game_count)
-    if not games:
-        raise RuntimeError(f"Claude 추천 파싱 실패: {text!r}")
-    log.info("Claude 추천 번호: %s", games)
-    return games
-
-
-def _parse_games(text: str, expected: int) -> list[list[int]]:
-    try:
-        cleaned = re.sub(r"^```(?:json)?|```$", "", text.strip(), flags=re.MULTILINE).strip()
-        data = json.loads(cleaned)
-        if isinstance(data, list) and all(isinstance(g, list) for g in data):
-            return [_validate_set(g) for g in data[:expected]]
-    except (json.JSONDecodeError, ValueError):
-        pass
-
-    games: list[list[int]] = []
-    for line in text.splitlines():
-        nums = [int(n) for n in NUMBER_PATTERN.findall(line)]
-        nums = list(dict.fromkeys(nums))
-        if len(nums) >= 6:
-            games.append(_validate_set(nums[:6]))
-        if len(games) == expected:
-            break
-    return games
-
-
-def _validate_set(nums: list[int]) -> list[int]:
-    s = sorted(set(int(n) for n in nums))
-    if len(s) != 6 or s[0] < 1 or s[-1] > 45:
-        raise ValueError(f"유효하지 않은 번호 세트: {nums}")
+def parse_game(raw: str) -> list[int]:
+    """'1,7,12,23,34,40' 또는 '1 7 12 23 34 40' 형식을 6개 정수 리스트로."""
+    nums = [int(t) for t in re.split(r"[,\s]+", raw.strip()) if t]
+    s = sorted(set(nums))
+    if len(nums) != 6 or len(s) != 6 or s[0] < 1 or s[-1] > 45:
+        raise ValueError(f"잘못된 번호 조합: {raw!r} (1~45 사이 서로 다른 정수 6개 필요)")
     return s
+
+
+def parse_games_from_stdin() -> list[list[int]]:
+    text = sys.stdin.read().strip()
+    data = json.loads(text)
+    if not isinstance(data, list):
+        raise ValueError("stdin은 JSON 배열이어야 합니다.")
+    games: list[list[int]] = []
+    for g in data:
+        if isinstance(g, str):
+            games.append(parse_game(g))
+        elif isinstance(g, list):
+            games.append(parse_game(",".join(str(n) for n in g)))
+        else:
+            raise ValueError(f"지원하지 않는 게임 형식: {g!r}")
+    return games
 
 
 # ---------- 알림 ----------
@@ -222,35 +187,48 @@ def notify_discord(webhook: str, result: PurchaseResult, balance_after: int | No
     lines = [title]
     if result.round_no:
         lines.append(f"회차: {result.round_no}")
-    lines.append("Claude 추천 번호:")
+    lines.append("구매 번호:")
     lines.append(games_text)
     lines.append(f"메시지: {result.message}")
     if balance_after is not None:
         lines.append(f"잔액: {balance_after:,}원")
-    payload = {"content": "\n".join(lines)}
     try:
-        requests.post(webhook, json=payload, timeout=10)
+        requests.post(webhook, json={"content": "\n".join(lines)}, timeout=10)
     except Exception as e:
         log.warning("Discord 알림 실패: %s", e)
 
 
 # ---------- 진입점 ----------
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="동행복권 로또 6/45 자동 구매")
+    parser.add_argument(
+        "games",
+        nargs="*",
+        help='게임 1개당 인자 1개. 예: "1,7,12,23,34,40" "3,9,15,22,31,45"',
+    )
+    parser.add_argument(
+        "--stdin",
+        action="store_true",
+        help="stdin에서 JSON 배열로 게임 입력",
+    )
+    args = parser.parse_args(argv)
+
     user_id = os.environ.get("DHLOTTERY_USER_ID")
     password = os.environ.get("DHLOTTERY_PASSWORD")
     if not (user_id and password):
         log.error("DHLOTTERY_USER_ID / DHLOTTERY_PASSWORD 환경변수가 필요합니다.")
         return 2
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        log.error("ANTHROPIC_API_KEY 환경변수가 필요합니다.")
+
+    if args.stdin:
+        games = parse_games_from_stdin()
+    elif args.games:
+        games = [parse_game(g) for g in args.games]
+    else:
+        parser.error("게임 번호를 인자 또는 --stdin으로 전달하세요.")
         return 2
 
-    game_count = int(os.environ.get("LOTTO_GAME_COUNT", "5"))
-    model = os.environ.get("CLAUDE_MODEL", "claude-opus-4-7")
-    webhook = os.environ.get("DISCORD_WEBHOOK_URL")
-
-    games = recommend_numbers(game_count, model)
+    log.info("구매할 번호: %s", games)
 
     client = DhLotteryClient(user_id, password)
     client.login()
@@ -262,6 +240,7 @@ def main() -> int:
     if balance_after is not None:
         log.info("잔액: %s원", f"{balance_after:,}")
 
+    webhook = os.environ.get("DISCORD_WEBHOOK_URL")
     if webhook:
         notify_discord(webhook, result, balance_after)
 

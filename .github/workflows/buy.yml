@@ -1,10 +1,12 @@
-name: Weekly Lotto Auto-Buy
+name: Lotto Auto-Buy
 
 on:
-  schedule:
-    # 매주 토요일 오전 11:00 KST = 02:00 UTC (추첨 9시간 전)
-    - cron: "0 2 * * 6"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      games:
+        description: 'JSON 배열 형식 (예: [[1,7,12,23,34,40],[3,9,15,22,31,45]])'
+        required: true
+        type: string
 
 jobs:
   buy:
@@ -15,11 +17,10 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt
-      - run: python lotto_bot.py
+      - name: Run lotto_bot
         env:
           DHLOTTERY_USER_ID: ${{ secrets.DHLOTTERY_USER_ID }}
           DHLOTTERY_PASSWORD: ${{ secrets.DHLOTTERY_PASSWORD }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-          LOTTO_GAME_COUNT: ${{ vars.LOTTO_GAME_COUNT || '5' }}
-          CLAUDE_MODEL: ${{ vars.CLAUDE_MODEL || 'claude-opus-4-7' }}
+          GAMES_JSON: ${{ inputs.games }}
+        run: echo "$GAMES_JSON" | python lotto_bot.py --stdin
