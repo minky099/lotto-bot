@@ -156,10 +156,23 @@ class DhLotteryClient:
 
     def balance(self) -> int | None:
         resp = self.session.get(BALANCE_URL, timeout=10)
-        m = re.search(r'예치금[^0-9]*([0-9,]+)\s*원', resp.text)
-        if not m:
-            return None
-        return int(m.group(1).replace(",", ""))
+        # myPage HTML 구조가 자주 바뀌므로 여러 패턴으로 시도.
+        patterns = [
+            r'예치금[\s\S]{0,500}?<strong[^>]*>\s*([0-9,]+)',
+            r'(?:total_new|deposit|myMoney)[^<>]{0,80}?<strong[^>]*>\s*([0-9,]+)',
+            r'예치금[\s\S]{0,500}?([0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)\s*(?:</[^>]+>\s*)*원',
+            r'예치금[^0-9]{0,200}([0-9,]+)\s*원',
+        ]
+        for p in patterns:
+            m = re.search(p, resp.text)
+            if m:
+                try:
+                    val = int(m.group(1).replace(",", ""))
+                except ValueError:
+                    continue
+                if val >= 0:
+                    return val
+        return None
 
 
 # ---------- 입력 파싱 ----------
