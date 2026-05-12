@@ -29,14 +29,6 @@ python lotto_bot.py "1,7,12,23,34,40" "3,9,15,22,31,45"
 echo '[[1,7,12,23,34,40],[3,9,15,22,31,45]]' | python lotto_bot.py --stdin
 ```
 
-## GitHub Actions로 실행
-1. Settings → Secrets에 등록: `DHLOTTERY_USER_ID`, `DHLOTTERY_PASSWORD`, (선택) `DISCORD_WEBHOOK_URL`
-2. Actions 탭 → `Lotto Auto-Buy` → `Run workflow`
-3. `games` 입력란에 JSON 배열 붙여넣기:
-   ```
-   [[1,7,12,23,34,40],[3,9,15,22,31,45]]
-   ```
-
 ## 주의
 - 동행복권 약관/자동화 정책을 직접 확인하고 본인 책임 하에 사용.
 - 비밀번호와 자격증명은 절대 커밋하지 말 것 (`.env`는 gitignore 처리됨).
