@@ -10,6 +10,9 @@
     python lotto_bot.py --dry-run "1,7,12,23,34,40"
         # 실제 구매 없이 번호 파싱/검증만 수행. 로그인/HTTP 호출 안 함.
 
+    python lotto_bot.py --login-only
+        # 로그인 성공 여부와 잔액만 확인하고 종료. 구매 안 함.
+
 환경 변수:
     DHLOTTERY_USER_ID, DHLOTTERY_PASSWORD : 동행복권 계정 (--dry-run 시 불필요)
     DISCORD_WEBHOOK_URL (선택)            : 알림용 웹훅
@@ -220,7 +223,27 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="실제 구매 없이 번호 파싱/검증만 수행 (로그인/HTTP 호출 안 함)",
     )
+    parser.add_argument(
+        "--login-only",
+        action="store_true",
+        help="로그인 성공 여부와 잔액만 확인하고 종료 (구매 안 함)",
+    )
     args = parser.parse_args(argv)
+
+    if args.login_only:
+        user_id = os.environ.get("DHLOTTERY_USER_ID")
+        password = os.environ.get("DHLOTTERY_PASSWORD")
+        if not (user_id and password):
+            log.error("DHLOTTERY_USER_ID / DHLOTTERY_PASSWORD 환경변수가 필요합니다.")
+            return 2
+        client = DhLotteryClient(user_id, password)
+        client.login()
+        balance = client.balance()
+        if balance is not None:
+            log.info("잔액: %s원", f"{balance:,}")
+        else:
+            log.warning("잔액 조회 실패 (로그인은 성공)")
+        return 0
 
     if args.stdin:
         games = parse_games_from_stdin()
