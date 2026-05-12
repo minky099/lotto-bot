@@ -125,23 +125,20 @@ class DhLotteryClient:
         # 로그인 결과 URL에 loginSuccess가 없거나, /login 경로로 다시 리다이렉트되면 실패.
         if "loginSuccess" not in resp.url and "method=login" in resp.url:
             raise RuntimeError("로그인 실패: 아이디/비밀번호를 확인하세요.")
+        # 구매 서브도메인(ol.dhlottery.co.kr) JSESSIONID 쿠키 확보를 위해 game645 페이지 방문.
         self.session.get(MAIN_URL, timeout=10)
+        self.session.get(GAME_PAGE_URL, timeout=10, allow_redirects=True)
         log.info("로그인 성공: %s", self.user_id)
 
     def _ready(self) -> str:
+        """execBuy.do의 'direct' 필드에 들어갈 사용자 IP를 ready 엔드포인트에서 받는다."""
         resp = self.session.post(READY_URL, headers={"Referer": GAME_PAGE_URL}, timeout=10)
         resp.raise_for_status()
         data = resp.json()
-        jsession = data.get("ready_ip") or self.session.cookies.get("JSESSIONID")
-        if not jsession:
-            raise RuntimeError("JSESSIONID 획득 실패")
-        return jsession
-
-    def _direct_ip(self) -> str:
-        try:
-            return requests.get("https://api.ipify.org", timeout=5).text.strip()
-        except Exception:
-            return "127.0.0.1"
+        ready_ip = data.get("ready_ip")
+        if not ready_ip:
+            raise RuntimeError("ready_ip 획득 실패")
+        return ready_ip
 
     @staticmethod
     def _draw_dates() -> tuple[int, dt.date, dt.date]:
@@ -156,8 +153,7 @@ class DhLotteryClient:
         if not 1 <= len(games) <= 5:
             raise ValueError("게임 수는 1~5 사이여야 합니다.")
 
-        jsession = self._ready()
-        direct = self._direct_ip()
+        direct = self._ready()
         round_no, draw_date, pay_limit = self._draw_dates()
 
         param = []
@@ -179,20 +175,18 @@ class DhLotteryClient:
             "gameCnt": str(len(games)),
             "saleMdaDcd": "10",
         }
+        # JSESSIONID는 세션 쿠키로 자동 전송되므로 헤더로 명시하지 않는다.
+        # Content-Type도 requests가 form 인코딩 시 자동 설정.
         headers = {
-            "Accept": "application/json, text/javascript, */*; q=0.01",
-            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-            "X-Requested-With": "XMLHttpRequest",
-            "Origin": "https://ol.dhlottery.co.kr",
             "Referer": GAME_PAGE_URL,
-            "JSESSIONID": jsession,
+            "Origin": "https://ol.dhlottery.co.kr",
         }
         resp = self.session.post(BUY_URL, data=body, headers=headers, timeout=20)
         resp.raise_for_status()
         data = resp.json()
 
         result = data.get("result", {})
-        ok = result.get("resultMsg", "").upper() == "SUCCESS"
+        ok = result.get("resultCode") == "100" or result.get("resultMsg", "").upper() == "SUCCESS"
         round_no = result.get("buyRound") or result.get("round")
         try:
             round_no = int(round_no) if round_no is not None else None
