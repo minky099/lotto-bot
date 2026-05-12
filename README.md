@@ -27,6 +27,9 @@ python lotto_bot.py "1,7,12,23,34,40" "3,9,15,22,31,45"
 
 # stdin 방식 (JSON 배열)
 echo '[[1,7,12,23,34,40],[3,9,15,22,31,45]]' | python lotto_bot.py --stdin
+
+# dry-run (실제 구매 없이 번호 검증만; 로그인/HTTP 호출 안 함)
+python lotto_bot.py --dry-run "1,7,12,23,34,40" "3,9,15,22,31,45"
 ```
 
 ## 주의

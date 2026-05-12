@@ -7,8 +7,11 @@
     python lotto_bot.py --stdin
         # stdin으로 JSON 배열 입력 (예: [[1,7,12,23,34,40], ...])
 
+    python lotto_bot.py --dry-run "1,7,12,23,34,40"
+        # 실제 구매 없이 번호 파싱/검증만 수행. 로그인/HTTP 호출 안 함.
+
 환경 변수:
-    DHLOTTERY_USER_ID, DHLOTTERY_PASSWORD : 동행복권 계정 (필수)
+    DHLOTTERY_USER_ID, DHLOTTERY_PASSWORD : 동행복권 계정 (--dry-run 시 불필요)
     DISCORD_WEBHOOK_URL (선택)            : 알림용 웹훅
 """
 
@@ -212,13 +215,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="stdin에서 JSON 배열로 게임 입력",
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="실제 구매 없이 번호 파싱/검증만 수행 (로그인/HTTP 호출 안 함)",
+    )
     args = parser.parse_args(argv)
-
-    user_id = os.environ.get("DHLOTTERY_USER_ID")
-    password = os.environ.get("DHLOTTERY_PASSWORD")
-    if not (user_id and password):
-        log.error("DHLOTTERY_USER_ID / DHLOTTERY_PASSWORD 환경변수가 필요합니다.")
-        return 2
 
     if args.stdin:
         games = parse_games_from_stdin()
@@ -229,6 +231,18 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     log.info("구매할 번호: %s", games)
+
+    if args.dry_run:
+        for i, g in enumerate(games):
+            log.info("[DRY-RUN] %s: %s", chr(ord("A") + i), " ".join(f"{n:02d}" for n in g))
+        log.info("[DRY-RUN] 총 %d게임 / %d원 — 실제 구매하지 않음", len(games), 1000 * len(games))
+        return 0
+
+    user_id = os.environ.get("DHLOTTERY_USER_ID")
+    password = os.environ.get("DHLOTTERY_PASSWORD")
+    if not (user_id and password):
+        log.error("DHLOTTERY_USER_ID / DHLOTTERY_PASSWORD 환경변수가 필요합니다.")
+        return 2
 
     client = DhLotteryClient(user_id, password)
     client.login()
