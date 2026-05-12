@@ -36,6 +36,8 @@ READY_URL = "https://ol.dhlottery.co.kr/olotto/game/egovUserReadySocket.json"
 BUY_URL = "https://ol.dhlottery.co.kr/olotto/game/execBuy.do"
 GAME_PAGE_URL = "https://ol.dhlottery.co.kr/olotto/game/game645.do"
 BALANCE_URL = "https://dhlottery.co.kr/userSsl.do?method=myPage"
+BALANCE_JSON_URL = "https://www.dhlottery.co.kr/mypage/selectUserMndp.do"
+MYPAGE_HOME_URL = "https://www.dhlottery.co.kr/mypage/home"
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -155,24 +157,27 @@ class DhLotteryClient:
         return PurchaseResult(ok=ok, round_no=round_no, games=games, message=message, raw=data)
 
     def balance(self) -> int | None:
-        resp = self.session.get(BALANCE_URL, timeout=10)
-        # myPage HTML 구조가 자주 바뀌므로 여러 패턴으로 시도.
-        patterns = [
-            r'예치금[\s\S]{0,500}?<strong[^>]*>\s*([0-9,]+)',
-            r'(?:total_new|deposit|myMoney)[^<>]{0,80}?<strong[^>]*>\s*([0-9,]+)',
-            r'예치금[\s\S]{0,500}?([0-9]{1,3}(?:,[0-9]{3})+|[0-9]+)\s*(?:</[^>]+>\s*)*원',
-            r'예치금[^0-9]{0,200}([0-9,]+)\s*원',
-        ]
-        for p in patterns:
-            m = re.search(p, resp.text)
-            if m:
-                try:
-                    val = int(m.group(1).replace(",", ""))
-                except ValueError:
-                    continue
-                if val >= 0:
-                    return val
-        return None
+        # roeniss/dhlottery-api 참고: HTML 파싱 대신 mypage JSON API 사용.
+        # 반환값은 구매가능금액(crntEntrsAmt).
+        headers = {
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": MYPAGE_HOME_URL,
+        }
+        resp = self.session.get(BALANCE_JSON_URL, headers=headers, timeout=10)
+        if resp.status_code != 200 or "json" not in resp.headers.get("Content-Type", "").lower():
+            return None
+        try:
+            user_mndp = resp.json().get("data", {}).get("userMndp", {}) or {}
+        except ValueError:
+            return None
+        val = user_mndp.get("crntEntrsAmt")
+        if val is None:
+            return None
+        try:
+            return int(val)
+        except (TypeError, ValueError):
+            return None
 
 
 # ---------- 입력 파싱 ----------
