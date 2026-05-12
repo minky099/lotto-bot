@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import binascii
+import datetime as dt
 import json
 import logging
 import os
@@ -29,10 +30,14 @@ import re
 import sys
 import time
 from dataclasses import dataclass
+from zoneinfo import ZoneInfo
 
 import requests
 from Crypto.Cipher import PKCS1_v1_5
 from Crypto.PublicKey import RSA
+
+KST = ZoneInfo("Asia/Seoul")
+FIRST_ROUND_DATE = dt.date(2002, 12, 7)  # 로또6/45 1회차 추첨일 (토)
 
 BASE_URL = "https://www.dhlottery.co.kr"
 LOGIN_PAGE_URL = f"{BASE_URL}/user.do?method=login"
@@ -138,12 +143,22 @@ class DhLotteryClient:
         except Exception:
             return "127.0.0.1"
 
+    @staticmethod
+    def _draw_dates() -> tuple[int, dt.date, dt.date]:
+        """현재 판매 중 회차 번호, 추첨일(이번 토), 지급기한(추첨일+365일) 반환."""
+        today = dt.datetime.now(KST).date()
+        days_until_sat = (5 - today.weekday()) % 7
+        this_sat = today + dt.timedelta(days=days_until_sat)
+        round_no = 1 + (this_sat - FIRST_ROUND_DATE).days // 7
+        return round_no, this_sat, this_sat + dt.timedelta(days=365)
+
     def buy(self, games: list[list[int]]) -> PurchaseResult:
         if not 1 <= len(games) <= 5:
             raise ValueError("게임 수는 1~5 사이여야 합니다.")
 
         jsession = self._ready()
         direct = self._direct_ip()
+        round_no, draw_date, pay_limit = self._draw_dates()
 
         param = []
         for idx, nums in enumerate(games):
@@ -155,11 +170,14 @@ class DhLotteryClient:
             })
 
         body = {
-            "round": "",
+            "round": str(round_no),
             "direct": direct,
             "nBuyAmount": str(1000 * len(games)),
             "param": json.dumps(param, ensure_ascii=False),
+            "ROUND_DRAW_DATE": draw_date.strftime("%Y/%m/%d"),
+            "WAMT_PAY_TLMT_END_DT": pay_limit.strftime("%Y/%m/%d"),
             "gameCnt": str(len(games)),
+            "saleMdaDcd": "10",
         }
         headers = {
             "Accept": "application/json, text/javascript, */*; q=0.01",
