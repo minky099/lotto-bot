@@ -21,23 +21,29 @@
 from __future__ import annotations
 
 import argparse
+import binascii
 import json
 import logging
 import os
 import re
 import sys
+import time
 from dataclasses import dataclass
 
 import requests
+from Crypto.Cipher import PKCS1_v1_5
+from Crypto.PublicKey import RSA
 
-LOGIN_URL = "https://www.dhlottery.co.kr/userSsl.do?method=login"
-MAIN_URL = "https://dhlottery.co.kr/common.do?method=main"
+BASE_URL = "https://www.dhlottery.co.kr"
+LOGIN_PAGE_URL = f"{BASE_URL}/user.do?method=login"
+RSA_KEY_URL = f"{BASE_URL}/login/selectRsaModulus.do"
+LOGIN_URL = f"{BASE_URL}/login/securityLoginCheck.do"
+MAIN_URL = f"{BASE_URL}/main"
 READY_URL = "https://ol.dhlottery.co.kr/olotto/game/egovUserReadySocket.json"
 BUY_URL = "https://ol.dhlottery.co.kr/olotto/game/execBuy.do"
 GAME_PAGE_URL = "https://ol.dhlottery.co.kr/olotto/game/game645.do"
-BALANCE_URL = "https://dhlottery.co.kr/userSsl.do?method=myPage"
-BALANCE_JSON_URL = "https://www.dhlottery.co.kr/mypage/selectUserMndp.do"
-MYPAGE_HOME_URL = "https://www.dhlottery.co.kr/mypage/home"
+BALANCE_JSON_URL = f"{BASE_URL}/mypage/selectUserMndp.do"
+MYPAGE_HOME_URL = f"{BASE_URL}/mypage/home"
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -69,31 +75,52 @@ class DhLotteryClient:
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": USER_AGENT})
 
+    @staticmethod
+    def _rsa_encrypt(text: str, modulus_hex: str, exponent_hex: str) -> str:
+        key = RSA.construct((int(modulus_hex, 16), int(exponent_hex, 16)))
+        cipher = PKCS1_v1_5.new(key)
+        return binascii.hexlify(cipher.encrypt(text.encode("utf-8"))).decode("ascii")
+
     def login(self) -> None:
-        # 로그인 페이지를 먼저 방문해 세션 쿠키 확보
-        self.session.get(
-            "https://dhlottery.co.kr/user.do?method=login&returnUrl=",
-            timeout=10,
-        )
-        payload = {
-            "returnUrl": MAIN_URL,
-            "userId": self.user_id,
-            "password": self.password,
-            "checkSave": "off",
-            "newsEventYn": "",
+        # dhlottery는 RSA 암호화 로그인으로 마이그레이션됨. (roeniss, techinpark 참고)
+        # 1) 웜업 → 2) RSA 공개키 조회 → 3) ID/PW 암호화 → 4) 로그인 POST
+        self.session.get(BASE_URL + "/", timeout=10)
+        self.session.get(LOGIN_PAGE_URL, timeout=10)
+
+        rsa_headers = {
+            "Accept": "application/json",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": LOGIN_PAGE_URL,
         }
-        headers = {
+        rsa_resp = self.session.get(RSA_KEY_URL, headers=rsa_headers, timeout=10)
+        rsa_resp.raise_for_status()
+        rsa_data = rsa_resp.json()
+        rsa_block = rsa_data.get("data", rsa_data)
+        modulus = rsa_block["rsaModulus"]
+        exponent = rsa_block["publicExponent"]
+
+        enc_id = self._rsa_encrypt(self.user_id, modulus, exponent)
+        enc_pw = self._rsa_encrypt(self.password, modulus, exponent)
+
+        login_headers = {
             "Content-Type": "application/x-www-form-urlencoded",
-            "Origin": "https://www.dhlottery.co.kr",
-            "Referer": "https://dhlottery.co.kr/user.do?method=login",
+            "Origin": BASE_URL,
+            "Referer": LOGIN_PAGE_URL,
         }
-        resp = self.session.post(LOGIN_URL, data=payload, headers=headers, timeout=15)
+        login_data = {
+            "userId": enc_id,
+            "userPswdEncn": enc_pw,
+            "inpUserId": self.user_id,
+        }
+        resp = self.session.post(
+            LOGIN_URL, headers=login_headers, data=login_data, timeout=15, allow_redirects=True
+        )
         resp.raise_for_status()
 
-        # 로그인 성공 검증: myPage 접근 시 로그인 페이지로 리다이렉트되면 실패.
-        mypage = self.session.get(BALANCE_URL, timeout=10, allow_redirects=True)
-        if "method=login" in mypage.url:
+        # 로그인 결과 URL에 loginSuccess가 없거나, /login 경로로 다시 리다이렉트되면 실패.
+        if "loginSuccess" not in resp.url and "method=login" in resp.url:
             raise RuntimeError("로그인 실패: 아이디/비밀번호를 확인하세요.")
+        self.session.get(MAIN_URL, timeout=10)
         log.info("로그인 성공: %s", self.user_id)
 
     def _ready(self) -> str:
@@ -157,27 +184,40 @@ class DhLotteryClient:
         return PurchaseResult(ok=ok, round_no=round_no, games=games, message=message, raw=data)
 
     def balance(self) -> int | None:
-        # roeniss/dhlottery-api 참고: HTML 파싱 대신 mypage JSON API 사용.
-        # 반환값은 구매가능금액(crntEntrsAmt).
+        # mypage JSON API에서 구매가능금액을 조회.
+        # roeniss는 crntEntrsAmt, techinpark는 totalAmt를 사용 — 응답에서 둘 다 시도.
+        self.session.get(MYPAGE_HOME_URL, timeout=10)
         headers = {
             "Accept": "application/json, text/javascript, */*; q=0.01",
             "X-Requested-With": "XMLHttpRequest",
             "Referer": MYPAGE_HOME_URL,
         }
-        resp = self.session.get(BALANCE_JSON_URL, headers=headers, timeout=10)
-        if resp.status_code != 200 or "json" not in resp.headers.get("Content-Type", "").lower():
+        url = f"{BALANCE_JSON_URL}?_={int(time.time() * 1000)}"
+        resp = self.session.get(url, headers=headers, timeout=10)
+        text = resp.text.strip()
+        if not text or text.startswith("<"):
             return None
         try:
-            user_mndp = resp.json().get("data", {}).get("userMndp", {}) or {}
+            data = resp.json()
         except ValueError:
             return None
-        val = user_mndp.get("crntEntrsAmt")
-        if val is None:
+
+        # 응답 형태가 {data: {userMndp: {...}}} 또는 {data: {...}} 또는 {userMndp: {...}} 등으로 변동.
+        node = data.get("data", data) if isinstance(data, dict) else {}
+        if isinstance(node, dict) and "userMndp" in node:
+            node = node["userMndp"]
+        if not isinstance(node, dict):
             return None
-        try:
-            return int(val)
-        except (TypeError, ValueError):
-            return None
+
+        for key in ("crntEntrsAmt", "totalAmt"):
+            val = node.get(key)
+            if val is None:
+                continue
+            try:
+                return int(str(val).replace(",", ""))
+            except (TypeError, ValueError):
+                continue
+        return None
 
 
 # ---------- 입력 파싱 ----------
