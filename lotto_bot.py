@@ -68,7 +68,11 @@ class DhLotteryClient:
         self.session.headers.update({"User-Agent": USER_AGENT})
 
     def login(self) -> None:
-        self.session.get(MAIN_URL, timeout=10)
+        # 로그인 페이지를 먼저 방문해 세션 쿠키 확보
+        self.session.get(
+            "https://dhlottery.co.kr/user.do?method=login&returnUrl=",
+            timeout=10,
+        )
         payload = {
             "returnUrl": MAIN_URL,
             "userId": self.user_id,
@@ -83,7 +87,10 @@ class DhLotteryClient:
         }
         resp = self.session.post(LOGIN_URL, data=payload, headers=headers, timeout=15)
         resp.raise_for_status()
-        if "비밀번호" in resp.text or "잘못" in resp.text or "FailLogin" in resp.text:
+
+        # 로그인 성공 검증: myPage 접근 시 로그인 페이지로 리다이렉트되면 실패.
+        mypage = self.session.get(BALANCE_URL, timeout=10, allow_redirects=True)
+        if "method=login" in mypage.url:
             raise RuntimeError("로그인 실패: 아이디/비밀번호를 확인하세요.")
         log.info("로그인 성공: %s", self.user_id)
 
