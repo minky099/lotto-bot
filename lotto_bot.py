@@ -51,9 +51,26 @@ BALANCE_JSON_URL = f"{BASE_URL}/mypage/selectUserMndp.do"
 MYPAGE_HOME_URL = f"{BASE_URL}/mypage/home"
 
 USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 )
+
+# roeniss/dhlottery-api 와 동일한 세션 기본 헤더.
+DEFAULT_HEADERS = {
+    "User-Agent": USER_AGENT,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9",
+    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Connection": "keep-alive",
+    "Cache-Control": "max-age=0",
+    "sec-ch-ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"macOS"',
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-User": "?1",
+    "Sec-Fetch-Dest": "document",
+}
 
 logging.basicConfig(
     level=logging.INFO,
@@ -78,7 +95,7 @@ class DhLotteryClient:
         self.user_id = user_id
         self.password = password
         self.session = requests.Session()
-        self.session.headers.update({"User-Agent": USER_AGENT})
+        self.session.headers.update(DEFAULT_HEADERS)
 
     @staticmethod
     def _rsa_encrypt(text: str, modulus_hex: str, exponent_hex: str) -> str:
@@ -131,23 +148,34 @@ class DhLotteryClient:
         log.info("로그인 성공: %s", self.user_id)
 
     def _ready(self) -> str:
-        """execBuy.do의 'direct' 필드에 들어갈 사용자 IP를 ready 엔드포인트에서 받는다."""
-        resp = self.session.post(READY_URL, headers={"Referer": GAME_PAGE_URL}, timeout=10)
+        """execBuy.do의 'direct' 필드에 들어갈 사용자 IP를 ready 엔드포인트에서 받는다.
+        roeniss는 헤더 없이 POST. 우리도 동일."""
+        resp = self.session.post(READY_URL, timeout=5)
         resp.raise_for_status()
-        data = resp.json()
-        ready_ip = data.get("ready_ip")
-        if not ready_ip:
-            raise RuntimeError("ready_ip 획득 실패")
-        return ready_ip
+        return json.loads(resp.text)["ready_ip"]
 
     @staticmethod
     def _draw_dates() -> tuple[int, dt.date, dt.date]:
-        """현재 판매 중 회차 번호, 추첨일(이번 토), 지급기한(추첨일+365일) 반환."""
+        """현재 판매 중 회차, 추첨일(이번 토), 지급기한(추첨일+365일).
+        roeniss의 _get_round + _calculate_draw_dates와 동일 로직."""
         today = dt.datetime.now(KST).date()
         days_until_sat = (5 - today.weekday()) % 7
         this_sat = today + dt.timedelta(days=days_until_sat)
         round_no = 1 + (this_sat - FIRST_ROUND_DATE).days // 7
         return round_no, this_sat, this_sat + dt.timedelta(days=365)
+
+    @staticmethod
+    def _make_param(games: list[list[int]]) -> str:
+        """roeniss의 _make_buy_loyyo645_param과 동일 포맷.
+        arrGameChoiceNum은 zero-padding 없는 쉼표 구분 문자열, 리스트로 감싸지 않음."""
+        params = []
+        for i, nums in enumerate(games):
+            params.append({
+                "genType": "1",  # MANUAL
+                "arrGameChoiceNum": ",".join(str(n) for n in sorted(nums)),
+                "alpabet": "ABCDE"[i],
+            })
+        return json.dumps(params)
 
     def buy(self, games: list[list[int]]) -> PurchaseResult:
         if not 1 <= len(games) <= 5:
@@ -156,34 +184,27 @@ class DhLotteryClient:
         direct = self._ready()
         round_no, draw_date, pay_limit = self._draw_dates()
 
-        param = []
-        for idx, nums in enumerate(games):
-            sorted_nums = sorted(nums)
-            param.append({
-                "genType": "1",  # 수동
-                "arrGameChoiceNum": [",".join(f"{n:02d}" for n in sorted_nums)],
-                "alpabet": chr(ord("A") + idx),
-            })
-
         body = {
             "round": str(round_no),
             "direct": direct,
             "nBuyAmount": str(1000 * len(games)),
-            "param": json.dumps(param, ensure_ascii=False),
+            "param": self._make_param(games),
             "ROUND_DRAW_DATE": draw_date.strftime("%Y/%m/%d"),
             "WAMT_PAY_TLMT_END_DT": pay_limit.strftime("%Y/%m/%d"),
-            "gameCnt": str(len(games)),
+            "gameCnt": len(games),
             "saleMdaDcd": "10",
         }
-        # JSESSIONID는 세션 쿠키로 자동 전송되므로 헤더로 명시하지 않는다.
-        # Content-Type도 requests가 form 인코딩 시 자동 설정.
-        headers = {
-            "Referer": GAME_PAGE_URL,
-            "Origin": "https://ol.dhlottery.co.kr",
-        }
-        resp = self.session.post(BUY_URL, data=body, headers=headers, timeout=20)
+        headers = {"Referer": GAME_PAGE_URL, "Origin": "https://ol.dhlottery.co.kr"}
+        resp = self.session.post(BUY_URL, headers=headers, data=body, timeout=10)
         resp.raise_for_status()
-        data = resp.json()
+        try:
+            data = resp.json()
+        except ValueError:
+            snippet = resp.text.strip()[:500].replace("\n", " ")
+            raise RuntimeError(
+                f"execBuy.do가 JSON이 아닌 응답을 반환 (Content-Type={resp.headers.get('Content-Type')}). "
+                f"본문 앞부분: {snippet}"
+            )
 
         result = data.get("result", {})
         ok = result.get("resultCode") == "100" or result.get("resultMsg", "").upper() == "SUCCESS"
